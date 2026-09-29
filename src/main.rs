@@ -548,6 +548,8 @@ enum Commands {
         chat_name: String,
         #[arg(short = 'n', long, default_value_t = 20)]
         count: usize,
+        #[arg(long, help = "Read an already-open chat window without selecting or opening a chat (experimental; Cmd-H may not expose its AX tree)")]
+        existing_window_only: bool,
     },
     /// Watch for incoming KakaoTalk messages via AX (no server contact,
     /// background) and fire hooks/webhooks on unread-count increases
@@ -1392,13 +1394,16 @@ fn main() -> Result<()> {
                 commands::safe_send::cmd_cancel(&intent_id, yes, json)?
             }
         },
-        Commands::AxRead { chat_name, count } => {
-            commands::ax_read::cmd_ax_read(commands::ax_read::AxReadOptions {
-                chat_name,
-                count,
-                json,
-            })?
-        }
+        Commands::AxRead {
+            chat_name,
+            count,
+            existing_window_only,
+        } => commands::ax_read::cmd_ax_read(commands::ax_read::AxReadOptions {
+            chat_name,
+            count,
+            existing_window_only,
+            json,
+        })?,
         Commands::AxWatch {
             interval,
             hook_cmd,
@@ -2577,6 +2582,41 @@ mod tests {
                 assert!(yes);
             }
             other => panic!("expected safe-send cancel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ax_read_existing_window_only_is_opt_in() {
+        let default = Cli::try_parse_from(["openkakao-cli", "ax-read", "room"])
+            .expect("normal ax-read should parse");
+        match default.command {
+            Commands::AxRead {
+                existing_window_only,
+                ..
+            } => assert!(!existing_window_only),
+            other => panic!("expected ax-read, got {other:?}"),
+        }
+
+        let experiment = Cli::try_parse_from([
+            "openkakao-cli",
+            "ax-read",
+            "room",
+            "--existing-window-only",
+            "-n",
+            "5",
+        ])
+        .expect("experimental ax-read should parse");
+        match experiment.command {
+            Commands::AxRead {
+                chat_name,
+                count,
+                existing_window_only,
+            } => {
+                assert_eq!(chat_name, "room");
+                assert_eq!(count, 5);
+                assert!(existing_window_only);
+            }
+            other => panic!("expected ax-read, got {other:?}"),
         }
     }
 

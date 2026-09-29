@@ -982,33 +982,51 @@ mod imp {
         }
     }
 
-    /// Read the most recent `count` messages visible in a chat's AX message list,
-    /// opening the chat first if it isn't already open. No local SQLCipher DB
-    /// access, so this works even when `local_db.rs`'s key derivation is stale
-    /// for the installed KakaoTalk build (see README deprecation notice). Only
-    /// messages already rendered on screen are returned — older history requires
-    /// scrolling up in KakaoTalk first.
-    pub fn read_via_ax(chat_display_name: &str, count: usize) -> Result<Vec<AxMessage>> {
+    /// Read the most recent `count` messages rendered in a chat's AX message list.
+    /// In existing-window-only mode, never select a chat-list row or open a new
+    /// window. This is an experimental read-only path for an already-open chat
+    /// while KakaoTalk is hidden with Cmd-H. macOS may omit hidden windows from
+    /// AXWindows or stop exposing their message tree; report that instead of
+    /// un-hiding the app or switching Spaces. Older history still requires the
+    /// user to scroll in KakaoTalk first; no local SQLCipher DB is accessed.
+    pub fn read_via_ax(
+        chat_display_name: &str,
+        count: usize,
+        existing_window_only: bool,
+    ) -> Result<Vec<AxMessage>> {
         let debug = std::env::var("OPENKAKAO_CLI_DEBUG").is_ok();
         let start = Instant::now();
         let pid = find_kakaotalk_pid()?;
         ensure_ax_permission()?;
         let app = bounded_application(pid)?;
 
-        open_chat_row(&app, chat_display_name)?;
-
-        let deadline = Instant::now() + OPEN_CHAT_TIMEOUT;
-        let mut messages = loop {
-            if let Some(window) = find_chat_window(&app, chat_display_name)? {
-                let msgs = read_visible_messages(&window)?;
-                if !msgs.is_empty() {
-                    break msgs;
+        let mut messages = if existing_window_only {
+            let window = find_chat_window(&app, chat_display_name)?.ok_or_else(|| {
+                anyhow!(
+                    "no already-open chat window named '{chat_display_name}' is exposed by Accessibility; open that chat before hiding KakaoTalk, or leave its window unminimized on the current Space"
+                )
+            })?;
+            if attr_as_bool(&window, "AXMinimized") == Some(true) {
+                anyhow::bail!(
+                    "chat window '{chat_display_name}' is minimized; this experimental mode will not restore it or steal focus"
+                );
+            }
+            read_visible_messages(&window)?
+        } else {
+            open_chat_row(&app, chat_display_name)?;
+            let deadline = Instant::now() + OPEN_CHAT_TIMEOUT;
+            loop {
+                if let Some(window) = find_chat_window(&app, chat_display_name)? {
+                    let msgs = read_visible_messages(&window)?;
+                    if !msgs.is_empty() {
+                        break msgs;
+                    }
                 }
+                if Instant::now() >= deadline {
+                    anyhow::bail!("chat window did not open (or has no visible messages) in time");
+                }
+                sleep(Duration::from_millis(150));
             }
-            if Instant::now() >= deadline {
-                anyhow::bail!("chat window did not open (or has no visible messages) in time");
-            }
-            sleep(Duration::from_millis(150));
         };
         if messages.len() > count {
             messages = messages.split_off(messages.len() - count);
@@ -1293,7 +1311,11 @@ mod stub {
         ))
     }
 
-    pub fn read_via_ax(_chat_display_name: &str, _count: usize) -> Result<Vec<AxMessage>> {
+    pub fn read_via_ax(
+        _chat_display_name: &str,
+        _count: usize,
+        _existing_window_only: bool,
+    ) -> Result<Vec<AxMessage>> {
         Err(anyhow!(
             "ax-read (AX automation) is only supported on macOS"
         ))
