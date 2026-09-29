@@ -245,6 +245,8 @@ mod imp {
     const VERIFY_POLL_INTERVAL: Duration = Duration::from_millis(200);
     const COMPOSER_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
     const COMPOSER_VERIFY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+    const RESTORE_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
+    const RESTORE_VERIFY_POLL_INTERVAL: Duration = Duration::from_millis(100);
     const SNAPSHOT_MAX_DEPTH: usize = 128;
     const SNAPSHOT_MAX_NODES: usize = 20_000;
     // A large chat list can exceed five seconds on newer KakaoTalk/macOS builds.
@@ -457,8 +459,22 @@ mod imp {
                 if let Err(error) = window.set_attribute(&attr, CFBoolean::true_value().as_CFType())
                 {
                     failures.push(format!("AXMinimized=true failed: {error:?}"));
-                } else if attr_as_bool(&window, "AXMinimized") != Some(true) {
-                    failures.push("AXMinimized=true could not be verified".to_string());
+                } else {
+                    // Some apps drop a minimized window from their AX tree
+                    // immediately after accepting the attribute change. Give
+                    // the state a bounded chance to settle, but never claim a
+                    // successful re-minimize without an AX read-back.
+                    let deadline = Instant::now() + RESTORE_VERIFY_TIMEOUT;
+                    while attr_as_bool(&window, "AXMinimized") != Some(true) {
+                        if Instant::now() >= deadline {
+                            failures.push(
+                                "AXMinimized=true could not be verified; check the window state manually"
+                                    .to_string(),
+                            );
+                            break;
+                        }
+                        sleep(RESTORE_VERIFY_POLL_INTERVAL);
+                    }
                 }
             }
             if failures.is_empty() {
@@ -1109,7 +1125,12 @@ mod imp {
             return match (result, cleanup) {
                 (Ok(messages), Ok(())) => Ok(messages),
                 (Err(error), Ok(())) => Err(error),
-                (Ok(_), Err(cleanup)) => Err(cleanup),
+                (Ok(messages), Err(cleanup)) => {
+                    eprintln!(
+                        "Warning: messages were read, but KakaoTalk's re-minimized state could not be confirmed: {cleanup:#}. Check the window manually."
+                    );
+                    Ok(messages)
+                }
                 (Err(error), Err(cleanup)) => Err(error.context(format!(
                     "KakaoTalk also could not be re-minimized: {cleanup:#}"
                 ))),
