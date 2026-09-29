@@ -88,6 +88,8 @@ openkakao-cli notif-watch --replay-existing --json
 openkakao-cli notif-watch --durable --json
 ```
 
+실험적 읽기 모드 (`--existing-window-only`): 먼저 카카오톡에서 대상 대화창을 직접 열어둔 뒤, 앱을 `⌘H`로 숨기고 `openkakao-cli ax-read "채팅방 표시 이름" -n 5 --existing-window-only --json`을 시도할 수 있습니다. 이 모드는 메인 채팅 목록을 선택하거나 새 대화창을 열지 않으며, 이미 열린 대화창의 정확한 제목과 현재 AX에 렌더링된 메시지만 읽습니다. 동일한 제목의 열린 창이 여러 개면 거부합니다. **`⌘H` 상태에서 macOS가 해당 AX 창과 메시지 트리를 노출할지는 보장되지 않습니다.** 최소화된 창이나 다른 Space에 있는 창을 복원하거나 포커스를 빼앗지 않으며, 접근 불가 시 오류로 종료합니다. 일반 `ax-read`와 메시지 전송 동작은 바뀌지 않습니다.
+
 > [!TIP]
 > **`ax-watch` vs `notif-watch`** — 둘 다 로그인 없이 수신을 감지합니다. `notif-watch`는 macOS 알림 센터 DB(평문 SQLite)를 읽으므로 **카카오톡 창이 닫혀/최소화돼 있거나 다른 Space에 있어도 동작**하고, 알림은 수신에만 뜨므로 **자기 발신을 자동으로 배제**합니다. 기본으로 시작 전 알림은 기준선으로만 삼으며, 감시 중단 사이의 알림까지 처리하려면 `--replay-existing`을 명시하세요. 장기 실행에는 `--durable`을 권장합니다. 이 모드는 이벤트를 `~/.config/openkakao/receive_inbox.db`에 먼저 저장하고 원자적 lease로 한 worker만 처리하며, 실패 시 지수 backoff로 재시도합니다. 8회 실패한 이벤트는 격리해 뒤 이벤트를 막지 않고, Notification Center에서 사라진 완료·격리 기록은 24시간 유예 후 정리합니다. 전달 의미론은 **at-least-once**입니다(외부 처리는 `chat_id`+`log_id`를 멱등 키로 쓰세요). 대신 **음소거·알림 끈 방**이나 **지금 포커스 중인 방**은 알림이 안 떠 감지하지 못하고, Notification Center에서 이미 삭제된 메시지는 재생할 수 없습니다. 창을 열어두고 그 방들까지 잡아야 하면 `ax-watch`를 병행하세요. 이벤트는 `event_type`, `chat_name`, `chat_id`(방ID), `log_id`(메시지ID), `message`, `attachment`, `received_at`를 담은 NDJSON입니다.
 
