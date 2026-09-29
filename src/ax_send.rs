@@ -369,25 +369,25 @@ mod imp {
     /// Find KakaoTalk's main chat-list window, as opposed to any individual
     /// open-chat windows (which are separate `AXWindow`s titled with the
     /// other party's — or your own, for the self chat — display name).
-    fn find_main_window(app: &AXUIElement) -> Result<AXUIElement> {
+    fn find_main_window_raw(app: &AXUIElement) -> Result<AXUIElement> {
         let windows = app
             .windows()
             .map_err(|e| anyhow!("AXWindows read failed: {e:?}"))?;
-        let window = windows
+        windows
             .iter()
             .find(|w| attr_as_string(w, "AXIdentifier").as_deref() == Some("Main Window"))
             .map(|w| w.clone())
             .ok_or_else(|| {
                 anyhow!(
-                    "could not find KakaoTalk's main chat-list window. Make sure it's open, not \
-                     minimized, and on the Space (virtual desktop) you're currently viewing — the \
-                     Accessibility API only sees windows that are visible on the active Space, and \
-                     restoring a minimized/off-Space window automatically risks stealing your \
-                     foreground focus, which this tool never does. One-time fix if this keeps \
-                     happening: right-click the KakaoTalk Dock icon → Options → \
-                     Assign To → All Desktops."
+                    "could not find KakaoTalk's main chat-list window in AXWindows. Make sure it \
+                     is open and accessible on the current Space; try assigning KakaoTalk to All \
+                     Desktops from its Dock icon if necessary."
                 )
-            })?;
+            })
+    }
+
+    fn find_main_window(app: &AXUIElement) -> Result<AXUIElement> {
+        let window = find_main_window_raw(app)?;
 
         // Note: a minimized window still shows up here (unlike one on another
         // Space, which disappears from `windows()` entirely), but restoring
@@ -411,6 +411,108 @@ mod imp {
         }
 
         Ok(window)
+    }
+
+    /// Tracks only windows changed by this opt-in operation. Cleanup is
+    /// attempted on both success and error; the Drop fallback also covers
+    /// early unwinding, but explicit cleanup reports failures to the caller.
+    #[derive(Default)]
+    struct TemporaryRestore {
+        to_minimize: Vec<AXUIElement>,
+    }
+
+    impl TemporaryRestore {
+        fn restore(&mut self, window: &AXUIElement) -> Result<()> {
+            if attr_as_bool(window, "AXMinimized") != Some(true) {
+                return Ok(());
+            }
+            self.to_minimize.push(window.clone());
+            let attr: AXAttribute<CFType> = AXAttribute::new(&CFString::new("AXMinimized"));
+            window
+                .set_attribute(&attr, CFBoolean::false_value().as_CFType())
+                .map_err(|error| {
+                    anyhow!("could not temporarily restore KakaoTalk window: {error:?}")
+                })?;
+            let deadline = Instant::now() + COMPOSER_VERIFY_TIMEOUT;
+            while attr_as_bool(window, "AXMinimized") != Some(false) {
+                if Instant::now() >= deadline {
+                    anyhow::bail!("could not verify KakaoTalk window was restored");
+                }
+                sleep(COMPOSER_VERIFY_POLL_INTERVAL);
+            }
+            // KakaoTalk can render the AX table/composer shortly after the
+            // minimized attribute flips, so give it one bounded settle step.
+            sleep(Duration::from_millis(150));
+            Ok(())
+        }
+
+        fn track_new_chat(&mut self, window: AXUIElement) {
+            self.to_minimize.push(window);
+        }
+
+        fn cleanup(&mut self) -> Result<()> {
+            let attr: AXAttribute<CFType> = AXAttribute::new(&CFString::new("AXMinimized"));
+            let mut failures = Vec::new();
+            for window in self.to_minimize.drain(..).rev() {
+                if let Err(error) = window.set_attribute(&attr, CFBoolean::true_value().as_CFType()) {
+                    failures.push(format!("AXMinimized=true failed: {error:?}"));
+                } else if attr_as_bool(&window, "AXMinimized") != Some(true) {
+                    failures.push("AXMinimized=true could not be verified".to_string());
+                }
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "could not re-minimize KakaoTalk window(s): {}",
+                    failures.join("; ")
+                )
+            }
+        }
+    }
+
+    impl Drop for TemporaryRestore {
+        fn drop(&mut self) {
+            if !self.to_minimize.is_empty() {
+                let _ = self.cleanup();
+            }
+        }
+    }
+
+    fn with_temporary_restore<T>(
+        app: &AXUIElement,
+        chat_name: &str,
+        existing_window_only: bool,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> (Result<T>, Result<()>) {
+        let mut guard = TemporaryRestore::default();
+        let mut initially_open = false;
+        let setup = (|| -> Result<()> {
+            if existing_window_only {
+                let chat = find_chat_window(app, chat_name)?.ok_or_else(|| {
+                    anyhow!("open the exact chat window before using --existing-window-only")
+                })?;
+                guard.restore(&chat)?;
+            } else {
+                let main = find_main_window_raw(app)?;
+                guard.restore(&main)?;
+                if let Some(chat) = find_chat_window(app, chat_name)? {
+                    initially_open = true;
+                    guard.restore(&chat)?;
+                }
+            }
+            Ok(())
+        })();
+        let changed_windows = !guard.to_minimize.is_empty();
+        let ready = setup.is_ok();
+        let result = setup.and_then(|()| operation());
+        if ready && changed_windows && !existing_window_only && !initially_open {
+            if let Ok(Some(chat)) = find_chat_window(app, chat_name) {
+                guard.track_new_chat(chat);
+            }
+        }
+        let cleanup = guard.cleanup();
+        (result, cleanup)
     }
 
     /// A single recursive snapshot of an AX subtree, capturing each node's
@@ -993,13 +1095,38 @@ mod imp {
         chat_display_name: &str,
         count: usize,
         existing_window_only: bool,
+        temporarily_restore: bool,
     ) -> Result<Vec<AxMessage>> {
-        let debug = std::env::var("OPENKAKAO_CLI_DEBUG").is_ok();
-        let start = Instant::now();
         let pid = find_kakaotalk_pid()?;
         ensure_ax_permission()?;
         let app = bounded_application(pid)?;
+        if temporarily_restore {
+            let (result, cleanup) = with_temporary_restore(
+                &app,
+                chat_display_name,
+                existing_window_only,
+                || read_via_ax_inner(&app, chat_display_name, count, existing_window_only),
+            );
+            return match (result, cleanup) {
+                (Ok(messages), Ok(())) => Ok(messages),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(_), Err(cleanup)) => Err(cleanup),
+                (Err(error), Err(cleanup)) => Err(error.context(format!(
+                    "KakaoTalk also could not be re-minimized: {cleanup:#}"
+                ))),
+            };
+        }
+        read_via_ax_inner(&app, chat_display_name, count, existing_window_only)
+    }
 
+    fn read_via_ax_inner(
+        app: &AXUIElement,
+        chat_display_name: &str,
+        count: usize,
+        existing_window_only: bool,
+    ) -> Result<Vec<AxMessage>> {
+        let debug = std::env::var("OPENKAKAO_CLI_DEBUG").is_ok();
+        let start = Instant::now();
         let mut messages = if existing_window_only {
             let window = find_chat_window(&app, chat_display_name)?.ok_or_else(|| {
                 anyhow!(
@@ -1048,7 +1175,45 @@ mod imp {
         let pid = find_kakaotalk_pid()?;
         ensure_ax_permission()?;
         let app = bounded_application(pid)?;
+        send_via_ax_classified_inner(pid, &app, chat_display_name, message)
+    }
 
+    pub fn send_via_ax_classified_with_restore(
+        chat_display_name: &str,
+        message: &str,
+    ) -> Result<super::AxDeliveryOutcome> {
+        let pid = find_kakaotalk_pid()?;
+        ensure_ax_permission()?;
+        let app = bounded_application(pid)?;
+        let (result, cleanup) = with_temporary_restore(&app, chat_display_name, false, || {
+            send_via_ax_classified_inner(pid, &app, chat_display_name, message)
+        });
+        match (result, cleanup) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(super::AxDeliveryOutcome::Verified), Err(cleanup)) => {
+                eprintln!(
+                    "Warning: message delivery was verified, but KakaoTalk could not be re-minimized: {cleanup:#}. Do not resend."
+                );
+                Ok(super::AxDeliveryOutcome::Verified)
+            }
+            (Ok(super::AxDeliveryOutcome::Uncertain { reason }), Err(cleanup)) => {
+                Ok(super::AxDeliveryOutcome::Uncertain {
+                    reason: format!("{reason}; KakaoTalk also could not be re-minimized: {cleanup:#}"),
+                })
+            }
+            (Err(error), Err(cleanup)) => Err(error.context(format!(
+                "KakaoTalk also could not be re-minimized: {cleanup:#}"
+            ))),
+        }
+    }
+
+    fn send_via_ax_classified_inner(
+        pid: i32,
+        app: &AXUIElement,
+        chat_display_name: &str,
+        message: &str,
+    ) -> Result<super::AxDeliveryOutcome> {
         // Always resolve the target through the chat list, even when an exact-
         // title window is already open. Otherwise one of two same-named rooms
         // could bypass the list-level ambiguity check through the old fast path.
@@ -1285,7 +1450,10 @@ mod imp {
 } // mod imp
 
 #[cfg(target_os = "macos")]
-pub use imp::{read_via_ax, scrape_chat_list, send_via_ax_classified, ChatListRow};
+pub use imp::{
+    read_via_ax, scrape_chat_list, send_via_ax_classified, send_via_ax_classified_with_restore,
+    ChatListRow,
+};
 
 #[cfg(not(target_os = "macos"))]
 mod stub {
@@ -1311,10 +1479,18 @@ mod stub {
         ))
     }
 
+    pub fn send_via_ax_classified_with_restore(
+        _chat_display_name: &str,
+        _message: &str,
+    ) -> Result<super::AxDeliveryOutcome> {
+        Err(anyhow!("local-send (AX automation) is only supported on macOS"))
+    }
+
     pub fn read_via_ax(
         _chat_display_name: &str,
         _count: usize,
         _existing_window_only: bool,
+        _temporarily_restore: bool,
     ) -> Result<Vec<AxMessage>> {
         Err(anyhow!(
             "ax-read (AX automation) is only supported on macOS"
@@ -1340,10 +1516,22 @@ mod stub {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub use stub::{read_via_ax, scrape_chat_list, send_via_ax_classified, ChatListRow};
+pub use stub::{
+    read_via_ax, scrape_chat_list, send_via_ax_classified, send_via_ax_classified_with_restore,
+    ChatListRow,
+};
 
-pub fn send_via_ax(chat_display_name: &str, message: &str) -> anyhow::Result<()> {
-    match send_via_ax_classified(chat_display_name, message)? {
+pub fn send_via_ax(
+    chat_display_name: &str,
+    message: &str,
+    temporarily_restore: bool,
+) -> anyhow::Result<()> {
+    let outcome = if temporarily_restore {
+        send_via_ax_classified_with_restore(chat_display_name, message)?
+    } else {
+        send_via_ax_classified(chat_display_name, message)?
+    };
+    match outcome {
         AxDeliveryOutcome::Verified => Ok(()),
         AxDeliveryOutcome::Uncertain { reason } => Err(anyhow::anyhow!(reason)),
     }
