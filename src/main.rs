@@ -2573,13 +2573,9 @@ mod tests {
 
     #[test]
     fn temporary_restore_is_opt_in_for_read_and_send() {
-        let read = Cli::try_parse_from([
-            "openkakao-cli",
-            "ax-read",
-            "room",
-            "--temporarily-restore",
-        ])
-        .expect("temporarily restored read should parse");
+        let read =
+            Cli::try_parse_from(["openkakao-cli", "ax-read", "room", "--temporarily-restore"])
+                .expect("temporarily restored read should parse");
         assert!(matches!(
             read.command,
             Commands::AxRead {

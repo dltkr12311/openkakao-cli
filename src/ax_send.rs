@@ -454,7 +454,8 @@ mod imp {
             let attr: AXAttribute<CFType> = AXAttribute::new(&CFString::new("AXMinimized"));
             let mut failures = Vec::new();
             for window in self.to_minimize.drain(..).rev() {
-                if let Err(error) = window.set_attribute(&attr, CFBoolean::true_value().as_CFType()) {
+                if let Err(error) = window.set_attribute(&attr, CFBoolean::true_value().as_CFType())
+                {
                     failures.push(format!("AXMinimized=true failed: {error:?}"));
                 } else if attr_as_bool(&window, "AXMinimized") != Some(true) {
                     failures.push("AXMinimized=true could not be verified".to_string());
@@ -1101,12 +1102,10 @@ mod imp {
         ensure_ax_permission()?;
         let app = bounded_application(pid)?;
         if temporarily_restore {
-            let (result, cleanup) = with_temporary_restore(
-                &app,
-                chat_display_name,
-                existing_window_only,
-                || read_via_ax_inner(&app, chat_display_name, count, existing_window_only),
-            );
+            let (result, cleanup) =
+                with_temporary_restore(&app, chat_display_name, existing_window_only, || {
+                    read_via_ax_inner(&app, chat_display_name, count, existing_window_only)
+                });
             return match (result, cleanup) {
                 (Ok(messages), Ok(())) => Ok(messages),
                 (Err(error), Ok(())) => Err(error),
@@ -1199,7 +1198,9 @@ mod imp {
             }
             (Ok(super::AxDeliveryOutcome::Uncertain { reason }), Err(cleanup)) => {
                 Ok(super::AxDeliveryOutcome::Uncertain {
-                    reason: format!("{reason}; KakaoTalk also could not be re-minimized: {cleanup:#}"),
+                    reason: format!(
+                        "{reason}; KakaoTalk also could not be re-minimized: {cleanup:#}"
+                    ),
                 })
             }
             (Err(error), Err(cleanup)) => Err(error.context(format!(
@@ -1483,7 +1484,9 @@ mod stub {
         _chat_display_name: &str,
         _message: &str,
     ) -> Result<super::AxDeliveryOutcome> {
-        Err(anyhow!("local-send (AX automation) is only supported on macOS"))
+        Err(anyhow!(
+            "local-send (AX automation) is only supported on macOS"
+        ))
     }
 
     pub fn read_via_ax(
