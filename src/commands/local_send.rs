@@ -8,6 +8,7 @@ pub struct LocalSendOptions {
     pub message: String,
     pub skip_confirm: bool,
     pub dry_run: bool,
+    pub temporarily_restore: bool,
     pub json: bool,
 }
 
@@ -21,6 +22,7 @@ pub fn cmd_local_send(opts: LocalSendOptions) -> Result<()> {
         ref message,
         skip_confirm,
         dry_run,
+        temporarily_restore,
         json,
     } = opts;
     validate_outbound_message(message)?;
@@ -59,7 +61,7 @@ pub fn cmd_local_send(opts: LocalSendOptions) -> Result<()> {
 
     // Returns Ok only after the sent text is confirmed in the target chat
     // window's own message bubbles (scoped verify inside send_via_ax).
-    ax_send::send_via_ax(chat_name, message)?;
+    ax_send::send_via_ax(chat_name, message, temporarily_restore)?;
 
     if json {
         crate::util::output_json(&serde_json::json!({

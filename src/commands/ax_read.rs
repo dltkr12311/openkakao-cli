@@ -6,6 +6,7 @@ pub struct AxReadOptions {
     pub chat_name: String,
     pub count: usize,
     pub existing_window_only: bool,
+    pub temporarily_restore: bool,
     pub json: bool,
 }
 
@@ -16,10 +17,12 @@ pub fn cmd_ax_read(opts: AxReadOptions) -> Result<()> {
         ref chat_name,
         count,
         existing_window_only,
+        temporarily_restore,
         json,
     } = opts;
 
-    let messages = ax_send::read_via_ax(chat_name, count, existing_window_only)?;
+    let messages =
+        ax_send::read_via_ax(chat_name, count, existing_window_only, temporarily_restore)?;
 
     if json {
         let items: Vec<_> = messages
