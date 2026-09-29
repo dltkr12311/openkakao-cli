@@ -548,7 +548,10 @@ enum Commands {
         chat_name: String,
         #[arg(short = 'n', long, default_value_t = 20)]
         count: usize,
-        #[arg(long, help = "Read an already-open chat window without selecting or opening a chat (experimental; Cmd-H may not expose its AX tree)")]
+        #[arg(
+            long,
+            help = "Read an already-open chat window without selecting or opening a chat (experimental; Cmd-H may not expose its AX tree)"
+        )]
         existing_window_only: bool,
     },
     /// Watch for incoming KakaoTalk messages via AX (no server contact,
